@@ -22,7 +22,9 @@ import (
 	"order-management/internal/auth"
 	"order-management/internal/category"
 	"order-management/internal/config"
+	"order-management/internal/inventory"
 	"order-management/internal/middleware"
+	"order-management/internal/order"
 	"order-management/internal/product"
 	"order-management/internal/user"
 	"order-management/internal/warehouse"
@@ -148,21 +150,35 @@ func newRouter(cfg *config.Config, log *zap.Logger, db *gorm.DB, redisClient *re
 	categoryRepo := category.NewRepository(db)
 	productRepo := product.NewRepository(db)
 	warehouseRepo := warehouse.NewRepository(db)
+	inventoryRepo := inventory.NewRepository(db)
 
 	authService := auth.NewService(userRepo, jwtManager, redisClient, cfg.RefreshTokenTTL)
 	userService := user.NewService(userRepo, audit.NopLogger{})
 	categoryService := category.NewService(categoryRepo)
 	productService := product.NewService(productRepo, redisClient, 10*time.Minute)
 	warehouseService := warehouse.NewService(warehouseRepo)
+	orderRepo := order.NewRepository(db)
+	// audit.NopLogger{} sementara sampai internal/audit (Iterasi 11) di-wire
+	// menggantikan seluruh pemakaian NopLogger di file ini sekaligus.
+	inventoryService := inventory.NewService(inventoryRepo, db, audit.NopLogger{})
+	// warehouseService & productService memenuhi order.WarehouseChecker &
+	// order.PriceProvider secara implisit (docs/architecture.md Section 2);
+	// inventoryService memenuhi order.StockReserver.
+	orderService := order.NewService(orderRepo, db, warehouseService, productService, inventoryService)
 
 	authHandler := auth.NewHandler(authService)
 	userHandler := user.NewHandler(userService)
 	categoryHandler := category.NewHandler(categoryService)
 	productHandler := product.NewHandler(productService)
 	warehouseHandler := warehouse.NewHandler(warehouseService)
+	inventoryHandler := inventory.NewHandler(inventoryService)
+	orderHandler := order.NewHandler(orderService)
 
 	jwtAuth := middleware.JWTAuth(jwtManager)
 	adminOnly := middleware.RequireRole("ADMIN")
+	adminWarehouse := middleware.RequireRole("ADMIN", "WAREHOUSE")
+	customerSalesOnly := middleware.RequireRole("CUSTOMER", "SALES")
+	customerOrAdmin := middleware.RequireRole("CUSTOMER", "ADMIN")
 	loginRateLimit := middleware.RateLimit(redisClient, log, "login", 5, time.Minute)
 	generalRateLimit := middleware.RateLimit(redisClient, log, "general", 100, time.Minute)
 
@@ -188,12 +204,14 @@ func newRouter(cfg *config.Config, log *zap.Logger, db *gorm.DB, redisClient *re
 	categoryHandler.RegisterRoutes(protected.Group("/categories"), adminOnly)
 	productHandler.RegisterRoutes(protected.Group("/products"), adminOnly)
 	warehouseHandler.RegisterRoutes(protected.Group("/warehouses"), adminOnly)
+	inventoryHandler.RegisterRoutes(protected.Group("/inventory"), adminWarehouse, adminOnly)
+	orderHandler.RegisterRoutes(protected.Group("/orders"), customerSalesOnly, customerOrAdmin)
 
-	// TODO(Agent 3): daftarkan route inventory/order/payment/shipment/
-	// notification/audit + GET /ws di sini setelah domain masing-masing
-	// selesai (lihat docs/api-contract.md). Gunakan `protected` group yang
-	// sama untuk endpoint yang butuh JWT, dan `v1` langsung untuk
-	// POST /payments/callback (publik, simulasi gateway eksternal).
+	// TODO(Agent 3): daftarkan route payment/shipment/notification/audit +
+	// GET /ws di sini setelah domain masing-masing selesai (lihat docs/
+	// api-contract.md). Gunakan `protected` group yang sama untuk endpoint
+	// yang butuh JWT, dan `v1` langsung untuk POST /payments/callback
+	// (publik, simulasi gateway eksternal).
 
 	return r
 }
