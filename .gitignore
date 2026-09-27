@@ -1,0 +1,27 @@
+# Environment
+.env
+
+# Go
+/order-management
+/server
+*.exe
+*.test
+*.out
+vendor/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+#etc
+/docs
+01-DOCUMENTATION.md
+02-ARCHITECTURE.md
+03-API.md
