@@ -24,10 +24,15 @@ import (
 	"order-management/internal/config"
 	"order-management/internal/inventory"
 	"order-management/internal/middleware"
+	"order-management/internal/notification"
 	"order-management/internal/order"
+	"order-management/internal/payment"
 	"order-management/internal/product"
+	"order-management/internal/shipment"
 	"order-management/internal/user"
 	"order-management/internal/warehouse"
+	"order-management/internal/websocket"
+	"order-management/internal/worker"
 	"order-management/pkg/audit"
 	"order-management/pkg/database"
 	"order-management/pkg/jwt"
@@ -73,7 +78,7 @@ func main() {
 
 	jwtManager := jwt.NewManager(cfg.JWTAccessSecret, cfg.JWTRefreshSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL)
 
-	router := newRouter(cfg, log, db, redisClient, jwtManager)
+	router, paymentService, notificationService := newRouter(cfg, log, db, redisClient, jwtManager)
 
 	srv := &http.Server{
 		Addr:    ":" + cfg.AppPort,
@@ -86,6 +91,29 @@ func main() {
 		}
 	}()
 	log.Info("server started", zap.String("port", cfg.AppPort), zap.String("env", cfg.AppEnv))
+
+	workerCtx, workerCancel := context.WithCancel(context.Background())
+
+	// Payment expiration worker (spec Iterasi 06) — jalan periodik setiap 1
+	// menit, mengikuti pola graceful shutdown yang sama dengan worker
+	// lain (Pool.Start/Stop, spec Section 89).
+	expirationPool := worker.NewPool(1, log)
+	expirationPool.Start(workerCtx, func(ctx context.Context, workerID int) {
+		worker.RunPaymentExpirationWorker(ctx, log, paymentService, time.Minute)
+	})
+
+	// Consumer group order_events/payment_events (spec Iterasi 07, Section
+	// 45-48) — minimal WORKER_COUNT worker per stream (default 4, dari
+	// .env). Handler notification (Iterasi 08): HandleOrderEvent hanya
+	// bereaksi ke ORDER_SHIPPED, HandlePaymentEvent hanya ke PAYMENT_PAID —
+	// event lain di stream yang sama diabaikan (return nil, bukan error).
+	orderEventsPool := worker.NewPool(cfg.WorkerCount, log)
+	orderConsumer := worker.NewOrderEventConsumer(redisClient, log, notificationService.HandleOrderEvent)
+	orderEventsPool.Start(workerCtx, orderConsumer.Run)
+
+	paymentEventsPool := worker.NewPool(cfg.WorkerCount, log)
+	paymentConsumer := worker.NewPaymentEventConsumer(redisClient, log, notificationService.HandlePaymentEvent)
+	paymentEventsPool.Start(workerCtx, paymentConsumer.Run)
 
 	// Graceful shutdown sesuai spec Section 65: tunggu SIGTERM/SIGINT,
 	// stop menerima request baru, beri waktu request aktif selesai,
@@ -101,13 +129,15 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Error("graceful shutdown failed", zap.Error(err))
 	}
-	// TODO(Agent 3): panggil worker.Pool.Stop() di sini SEBELUM baris ini,
-	// agar background worker berhenti graceful sebelum proses exit
-	// (spec Section 89) — lihat docs/CHANGE_REQUESTS.md untuk koordinasi.
+
+	workerCancel()
+	expirationPool.Stop()
+	orderEventsPool.Stop()
+	paymentEventsPool.Stop()
 	log.Info("server stopped")
 }
 
-func newRouter(cfg *config.Config, log *zap.Logger, db *gorm.DB, redisClient *redis.Client, jwtManager *jwt.Manager) *gin.Engine {
+func newRouter(cfg *config.Config, log *zap.Logger, db *gorm.DB, redisClient *redis.Client, jwtManager *jwt.Manager) (*gin.Engine, *payment.Service, *notification.Service) {
 	if cfg.AppEnv != "development" {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -165,6 +195,31 @@ func newRouter(cfg *config.Config, log *zap.Logger, db *gorm.DB, redisClient *re
 	// order.PriceProvider secara implisit (docs/architecture.md Section 2);
 	// inventoryService memenuhi order.StockReserver.
 	orderService := order.NewService(orderRepo, db, warehouseService, productService, inventoryService)
+	paymentRepo := payment.NewRepository(db)
+	// orderService memenuhi payment.OrderGateway, inventoryService memenuhi
+	// payment.StockAdjuster (keduanya lewat method passthrough yang sudah
+	// ditambahkan khusus untuk titik integrasi ini).
+	paymentService := payment.NewService(paymentRepo, db, orderService, inventoryService)
+	notificationService := notification.NewService(notification.NewRepository(db))
+	// orderService memenuhi shipment.OrderGateway juga (method passthrough
+	// yang sama dipakai Payment Service).
+	shipmentService := shipment.NewService(shipment.NewRepository(db), db, orderService)
+
+	// Publish event Redis Streams (Iterasi 07) SETELAH commit — lihat
+	// masing-masing Service untuk event apa yang dipublish (ORDER_CREATED/
+	// ORDER_CANCELLED/PAYMENT_PAID/ORDER_SHIPPED).
+	eventPublisher := worker.NewRedisPublisher(redisClient, log)
+	orderService.SetEventPublisher(eventPublisher)
+	paymentService.SetEventPublisher(eventPublisher)
+	shipmentService.SetEventPublisher(eventPublisher)
+
+	// WebSocket connection manager (Iterasi 10) — Notify dipanggil SETELAH
+	// commit oleh Order/Payment/Shipment Service (spec Section 50 & FILES
+	// AFFECTED note), bukan di dalam transaksi DB.
+	wsManager := websocket.NewManager()
+	orderService.SetWebSocketManager(wsManager)
+	paymentService.SetWebSocketManager(wsManager)
+	shipmentService.SetWebSocketManager(wsManager)
 
 	authHandler := auth.NewHandler(authService)
 	userHandler := user.NewHandler(userService)
@@ -173,10 +228,15 @@ func newRouter(cfg *config.Config, log *zap.Logger, db *gorm.DB, redisClient *re
 	warehouseHandler := warehouse.NewHandler(warehouseService)
 	inventoryHandler := inventory.NewHandler(inventoryService)
 	orderHandler := order.NewHandler(orderService)
+	paymentHandler := payment.NewHandler(paymentService)
+	notificationHandler := notification.NewHandler(notificationService)
+	shipmentHandler := shipment.NewHandler(shipmentService)
 
 	jwtAuth := middleware.JWTAuth(jwtManager)
 	adminOnly := middleware.RequireRole("ADMIN")
 	adminWarehouse := middleware.RequireRole("ADMIN", "WAREHOUSE")
+	warehouseOnly := middleware.RequireRole("WAREHOUSE")
+	customerOnly := middleware.RequireRole("CUSTOMER")
 	customerSalesOnly := middleware.RequireRole("CUSTOMER", "SALES")
 	customerOrAdmin := middleware.RequireRole("CUSTOMER", "ADMIN")
 	loginRateLimit := middleware.RateLimit(redisClient, log, "login", 5, time.Minute)
@@ -206,12 +266,22 @@ func newRouter(cfg *config.Config, log *zap.Logger, db *gorm.DB, redisClient *re
 	warehouseHandler.RegisterRoutes(protected.Group("/warehouses"), adminOnly)
 	inventoryHandler.RegisterRoutes(protected.Group("/inventory"), adminWarehouse, adminOnly)
 	orderHandler.RegisterRoutes(protected.Group("/orders"), customerSalesOnly, customerOrAdmin)
+	paymentHandler.RegisterRoutes(protected.Group("/orders"), protected.Group("/payments"), customerOnly)
+	notificationHandler.RegisterRoutes(protected.Group("/notifications"))
+	shipmentHandler.RegisterRoutes(protected.Group("/orders"), protected.Group("/shipments"), warehouseOnly)
 
-	// TODO(Agent 3): daftarkan route payment/shipment/notification/audit +
-	// GET /ws di sini setelah domain masing-masing selesai (lihat docs/
-	// api-contract.md). Gunakan `protected` group yang sama untuk endpoint
-	// yang butuh JWT, dan `v1` langsung untuk POST /payments/callback
-	// (publik, simulasi gateway eksternal).
+	// POST /payments/callback: publik (simulasi gateway eksternal), TIDAK
+	// pakai middleware jwtAuth — divalidasi lewat transaction_id di service.
+	v1.POST("/payments/callback", paymentHandler.Callback)
 
-	return r
+	// GET /ws: didaftarkan di root `r` (sejajar /health, /ready), BUKAN di
+	// bawah `protected` — JWT-nya divalidasi manual dari query param di
+	// dalam handler sendiri (Locked Decision), bukan via middleware.JWTAuth.
+	wsHandler := websocket.NewHandler(wsManager, jwtManager, log)
+	wsHandler.RegisterRoutes(r)
+
+	// TODO(Agent 3): daftarkan route audit di sini setelah Iterasi 11
+	// selesai (lihat docs/api-contract.md).
+
+	return r, paymentService, notificationService
 }

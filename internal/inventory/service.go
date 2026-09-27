@@ -255,6 +255,40 @@ func (s *Service) ReleaseStock(ctx context.Context, tx *gorm.DB, productID, ware
 	})
 }
 
+// StockOut mengimplementasikan Locked Decision "Stock-out timing"
+// (03-BACKEND-CORE.md Section 3): dipanggil di TRANSAKSI YANG SAMA dengan
+// payment callback saat payment->PAID. quantity fisik DAN reserved_quantity
+// berkurang qty sekaligus — barang benar-benar keluar gudang, reservasi
+// yang menyertainya otomatis lunas dalam operasi yang sama.
+func (s *Service) StockOut(ctx context.Context, tx *gorm.DB, productID, warehouseID string, qty int, referenceID string) error {
+	inv, err := s.repo.LockForUpdate(ctx, tx, productID, warehouseID)
+	if err != nil {
+		return err
+	}
+
+	if inv.Quantity < qty || inv.ReservedQuantity < qty {
+		// Seharusnya tidak pernah terjadi kalau ReserveStock sudah dipanggil
+		// benar sebelumnya — dijaga di sini sebagai defense-in-depth supaya
+		// tidak pernah menulis quantity/reserved_quantity negatif.
+		return apperr.New(http.StatusConflict, apperr.InsufficientStock, "Stock-out would result in negative inventory")
+	}
+
+	inv.Quantity -= qty
+	inv.ReservedQuantity -= qty
+	if err := s.repo.UpdateTx(ctx, tx, inv); err != nil {
+		return err
+	}
+
+	refType := "ORDER"
+	return s.repo.CreateTransaction(ctx, tx, &Transaction{
+		InventoryID:   inv.ID,
+		Type:          TransactionStockOut,
+		Quantity:      qty,
+		ReferenceType: &refType,
+		ReferenceID:   &referenceID,
+	})
+}
+
 func (s *Service) lockOrCreate(ctx context.Context, tx *gorm.DB, productID, warehouseID string) (*Inventory, error) {
 	inv, err := s.repo.LockForUpdate(ctx, tx, productID, warehouseID)
 	if err == nil {

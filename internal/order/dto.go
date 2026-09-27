@@ -35,6 +35,14 @@ type DetailResponse struct {
 	Items []ItemResponse `json:"items"`
 }
 
+// ToResponse adalah wrapper exported dari toResponse — dipakai domain lain
+// milik Agent 3 (Shipment, Iterasi 09) yang mengubah status order lewat
+// method passthrough (LockForUpdate/UpdateStatus) dan perlu mengembalikan
+// representasi order yang konsisten dengan endpoint /orders lainnya.
+func ToResponse(o *Order) Response {
+	return toResponse(o)
+}
+
 func toResponse(o *Order) Response {
 	return Response{
 		ID:           o.ID,

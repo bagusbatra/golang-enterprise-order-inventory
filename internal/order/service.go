@@ -11,6 +11,7 @@ import (
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 
+	"order-management/internal/websocket"
 	apperr "order-management/pkg/errors"
 )
 
@@ -46,6 +47,14 @@ type StockReserver interface {
 	ReleaseStock(ctx context.Context, tx *gorm.DB, productID, warehouseID string, qty int, referenceID string) error
 }
 
+// EventPublisher adalah titik integrasi dengan internal/worker (Redis
+// Streams, Iterasi 07) — opsional (nil-safe, lihat SetEventPublisher).
+// Dipanggil SETELAH transaksi commit (architecture.md Section 3: "Event
+// dipublish SETELAH transaksi database commit, tidak pernah sebelum").
+type EventPublisher interface {
+	Publish(ctx context.Context, stream, eventType, aggregateID string, payload any) error
+}
+
 // taxRate & shippingCost — Locked Decision 03-BACKEND-CORE.md Section 3:
 // tax = subtotal x 11%, shipping fixed Rp20.000, discount selalu 0.
 var (
@@ -59,10 +68,37 @@ type Service struct {
 	warehouse WarehouseChecker
 	price     PriceProvider
 	stock     StockReserver
+	events    EventPublisher
+	ws        *websocket.Manager
 }
 
 func NewService(repo Repository, db TxRunner, warehouse WarehouseChecker, price PriceProvider, stock StockReserver) *Service {
 	return &Service{repo: repo, db: db, warehouse: warehouse, price: price, stock: stock}
+}
+
+// SetEventPublisher menyuntikkan publisher Redis Streams (Iterasi 07) tanpa
+// mengubah signature NewService (menghindari perubahan di seluruh call site
+// yang sudah ada, termasuk test). Dibiarkan nil di test unit — Publish tidak
+// pernah dipanggil kalau nil.
+func (s *Service) SetEventPublisher(p EventPublisher) {
+	s.events = p
+}
+
+// SetWebSocketManager menyuntikkan connection manager (Iterasi 10) — nil-safe
+// sama seperti SetEventPublisher. Dipanggil SETELAH commit, bukan di dalam
+// transaksi DB (spec Iterasi 10 FILES AFFECTED note).
+func (s *Service) SetWebSocketManager(m *websocket.Manager) {
+	s.ws = m
+}
+
+func (s *Service) notifyStatusUpdated(customerID, orderID string, status Status) {
+	if s.ws == nil {
+		return
+	}
+	s.ws.Notify(customerID, websocket.Event{
+		Event: "ORDER_STATUS_UPDATED",
+		Data:  map[string]string{"order_id": orderID, "status": string(status)},
+	})
 }
 
 type orderLine struct {
@@ -78,16 +114,20 @@ type orderLine struct {
 //  1. Validasi warehouse ACTIVE.
 //  2. Urutkan item berdasarkan product_id ASC — mencegah deadlock antar
 //     request konkuren yang memesan kombinasi produk berbeda urutan.
-//  3. BEGIN TRANSACTION.
-//  4. Pass 1: untuk setiap item (urutan ASC), CheckAndLock (row lock FOR
-//     UPDATE + validasi available stock) DAN snapshot harga TERKINI (spec
-//     Section 15). Item mana pun yang gagal -> seluruh transaksi batal,
-//     TIDAK ADA row order/order_items yang pernah ditulis.
-//  5. Generate order_number (lock counter table).
-//  6. Create orders + order_items.
-//  7. Pass 2: ReserveStock per item (menambah reserved_quantity + catat
+//  3. Snapshot harga TERKINI setiap item (spec Section 15) — SEBELUM BEGIN
+//     TRANSACTION, lihat komentar di lokasi pemanggilan untuk alasan
+//     (menghindari koneksi database kedua dipakai SAAT transaksi lain
+//     menahan row lock, yang bisa membuat connection pool saling menunggu).
+//  4. BEGIN TRANSACTION.
+//  5. Pass 1: untuk setiap item (urutan ASC), CheckAndLock (row lock FOR
+//     UPDATE + validasi available stock). Item mana pun yang gagal ->
+//     seluruh transaksi batal, TIDAK ADA row order/order_items yang pernah
+//     ditulis.
+//  6. Generate order_number (lock counter table).
+//  7. Create orders + order_items.
+//  8. Pass 2: ReserveStock per item (menambah reserved_quantity + catat
 //     inventory_transactions RESERVE, reference ke order yang baru dibuat).
-//  8. COMMIT.
+//  9. COMMIT.
 //
 // Publish event ORDER_CREATED (Iterasi 07) dilakukan oleh caller SETELAH
 // fungsi ini sukses — bukan di sini, supaya tetap "publish setelah commit"
@@ -105,26 +145,38 @@ func (s *Service) CreateOrder(ctx context.Context, customerID string, req Create
 	copy(items, req.Items)
 	sort.Slice(items, func(i, j int) bool { return items[i].ProductID < items[j].ProductID })
 
+	// Snapshot harga SEBELUM membuka transaksi/lock — price lookup memakai
+	// koneksi database TERPISAH dari transaksi lock inventory (titik
+	// integrasi product.GetPriceSnapshot bukan bagian dari tx ini). Memanggil
+	// query ber-koneksi-terpisah SAAT transaksi lain sedang menahan row lock
+	// bisa membuat pool koneksi (yang ukurannya terbatas) saling menunggu:
+	// pemenang lock butuh koneksi ekstra untuk price lookup, sementara
+	// koneksi lain habis dipakai request yang justru menunggu lock yang
+	// sama — deadlock di level connection pool, bukan di level row lock.
+	// Mengambil harga dulu (di luar tx) menghilangkan risiko itu SEKALIGUS
+	// memperpendek waktu row lock ditahan (lock hanya untuk operasi
+	// inventory, bukan ikut menunggu round-trip ke tabel products).
+	lines := make([]orderLine, 0, len(items))
+	subtotal := decimal.Zero
+	for _, it := range items {
+		price, err := s.price.GetPriceSnapshot(ctx, it.ProductID)
+		if err != nil {
+			return nil, err
+		}
+		lineSubtotal := price.Mul(decimal.NewFromInt(int64(it.Quantity)))
+		lines = append(lines, orderLine{ProductID: it.ProductID, Quantity: it.Quantity, UnitPrice: price, Subtotal: lineSubtotal})
+		subtotal = subtotal.Add(lineSubtotal)
+	}
+	tax := subtotal.Mul(taxRate).Round(2)
+	grandTotal := subtotal.Add(tax).Add(shippingCost)
+
 	var result Response
 	err = s.db.Transaction(func(tx *gorm.DB) error {
-		lines := make([]orderLine, 0, len(items))
-		subtotal := decimal.Zero
-
 		for _, it := range items {
 			if err := s.stock.CheckAndLock(ctx, tx, it.ProductID, req.WarehouseID, it.Quantity); err != nil {
 				return err
 			}
-			price, err := s.price.GetPriceSnapshot(ctx, it.ProductID)
-			if err != nil {
-				return err
-			}
-			lineSubtotal := price.Mul(decimal.NewFromInt(int64(it.Quantity)))
-			lines = append(lines, orderLine{ProductID: it.ProductID, Quantity: it.Quantity, UnitPrice: price, Subtotal: lineSubtotal})
-			subtotal = subtotal.Add(lineSubtotal)
 		}
-
-		tax := subtotal.Mul(taxRate).Round(2)
-		grandTotal := subtotal.Add(tax).Add(shippingCost)
 
 		orderNumber, err := s.repo.NextOrderNumber(ctx, tx, time.Now())
 		if err != nil {
@@ -161,6 +213,13 @@ func (s *Service) CreateOrder(ctx context.Context, customerID string, req Create
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	if s.events != nil {
+		_ = s.events.Publish(ctx, "order_events", "ORDER_CREATED", result.ID, map[string]string{
+			"order_id":    result.ID,
+			"customer_id": customerID,
+		})
 	}
 	return &result, nil
 }
@@ -257,5 +316,36 @@ func (s *Service) Cancel(ctx context.Context, actorUserID, actorRole, orderID st
 	if err != nil {
 		return nil, err
 	}
+
+	if s.events != nil {
+		_ = s.events.Publish(ctx, "order_events", "ORDER_CANCELLED", orderID, map[string]string{"order_id": orderID})
+	}
+	s.notifyStatusUpdated(result.CustomerID, orderID, StatusCancelled)
 	return &result, nil
+}
+
+// Titik integrasi resmi dengan Payment Service (Agent 3 sendiri, Iterasi
+// 06) — payment callback & expiration worker perlu mengubah status order
+// DALAM TRANSAKSI YANG SAMA dengan perubahan status payment (idempotency).
+// Diekspos sebagai passthrough tipis ke Repository (bukan reach-into
+// internal struct) agar Payment tidak perlu tahu apa pun soal *gorm.DB
+// wiring order selain lewat Service ini.
+
+// FindRawByID mengembalikan *Order mentah (tanpa DTO/ownership check) —
+// dipakai Payment Service untuk membaca customer_id/status/grand_total saat
+// membuat payment baru.
+func (s *Service) FindRawByID(ctx context.Context, orderID string) (*Order, error) {
+	return s.repo.FindByID(ctx, orderID)
+}
+
+func (s *Service) LockForUpdate(ctx context.Context, tx *gorm.DB, orderID string) (*Order, error) {
+	return s.repo.LockForUpdate(ctx, tx, orderID)
+}
+
+func (s *Service) UpdateStatus(ctx context.Context, tx *gorm.DB, orderID string, status Status) error {
+	return s.repo.UpdateStatus(ctx, tx, orderID, status)
+}
+
+func (s *Service) ItemsByOrderID(ctx context.Context, tx *gorm.DB, orderID string) ([]OrderItem, error) {
+	return s.repo.ItemsByOrderID(ctx, tx, orderID)
 }

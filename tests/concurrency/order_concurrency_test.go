@@ -15,24 +15,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
-	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 	"github.com/shopspring/decimal"
-	"github.com/testcontainers/testcontainers-go"
-	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
-	"github.com/testcontainers/testcontainers-go/wait"
-	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
-	gormlogger "gorm.io/gorm/logger"
 
 	"order-management/internal/category"
 	"order-management/internal/inventory"
@@ -41,89 +31,8 @@ import (
 	"order-management/internal/user"
 	"order-management/internal/warehouse"
 	apperr "order-management/pkg/errors"
+	"order-management/tests/testutil"
 )
-
-func setupPostgres(t *testing.T) *gorm.DB {
-	t.Helper()
-	ctx := context.Background()
-
-	pgContainer, err := tcpostgres.Run(ctx,
-		"postgres:16-alpine",
-		tcpostgres.WithDatabase("order_management_test"),
-		tcpostgres.WithUsername("postgres"),
-		tcpostgres.WithPassword("postgres"),
-		testcontainers.WithWaitStrategy(
-			wait.ForLog("database system is ready to accept connections").
-				WithOccurrence(2).WithStartupTimeout(60*time.Second),
-		),
-	)
-	if err != nil {
-		t.Fatalf("failed to start postgres container (Docker required for this test): %v", err)
-	}
-	t.Cleanup(func() {
-		if err := pgContainer.Terminate(context.Background()); err != nil {
-			t.Logf("failed to terminate postgres container: %v", err)
-		}
-	})
-
-	dsn, err := pgContainer.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatalf("failed to get connection string: %v", err)
-	}
-
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: gormlogger.Default.LogMode(gormlogger.Silent)})
-	if err != nil {
-		t.Fatalf("failed to connect to test postgres: %v", err)
-	}
-
-	applyMigrations(t, db)
-	return db
-}
-
-// applyMigrations menjalankan seluruh *.up.sql di folder migrations/ secara
-// berurutan (numerik) — cara paling sederhana untuk skema tanpa perlu
-// bergantung pada golang-migrate CLI di dalam test.
-func applyMigrations(t *testing.T, db *gorm.DB) {
-	t.Helper()
-
-	migDir, err := filepath.Abs(filepath.Join("..", "..", "migrations"))
-	if err != nil {
-		t.Fatalf("failed to resolve migrations dir: %v", err)
-	}
-
-	entries, err := os.ReadDir(migDir)
-	if err != nil {
-		t.Fatalf("failed to read migrations dir: %v", err)
-	}
-
-	var upFiles []string
-	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".up.sql") {
-			upFiles = append(upFiles, e.Name())
-		}
-	}
-	sort.Strings(upFiles)
-
-	for _, name := range upFiles {
-		content, err := os.ReadFile(filepath.Join(migDir, name))
-		if err != nil {
-			t.Fatalf("failed to read migration %s: %v", name, err)
-		}
-		if err := db.Exec(string(content)).Error; err != nil {
-			t.Fatalf("failed to apply migration %s: %v", name, err)
-		}
-	}
-}
-
-func newTestRedis(t *testing.T) *redis.Client {
-	t.Helper()
-	mr, err := miniredis.Run()
-	if err != nil {
-		t.Fatalf("failed to start miniredis: %v", err)
-	}
-	t.Cleanup(mr.Close)
-	return redis.NewClient(&redis.Options{Addr: mr.Addr()})
-}
 
 type seeded struct {
 	CustomerID  string
@@ -231,8 +140,8 @@ func TestConcurrentCheckout_ExactlyTenSucceed(t *testing.T) {
 	const concurrentRequests = 100
 	const runs = 5
 
-	db := setupPostgres(t)
-	redisClient := newTestRedis(t)
+	db := testutil.SetupPostgres(t)
+	redisClient := testutil.NewTestRedis(t)
 	seed := seedBaseData(t, db, initialStock)
 	svc := buildOrderService(db, redisClient)
 
@@ -251,7 +160,10 @@ func TestConcurrentCheckout_ExactlyTenSucceed(t *testing.T) {
 				go func() {
 					defer wg.Done()
 					<-start // semua goroutine mulai SETELAH barrier dibuka -> benar-benar konkuren
-					_, err := svc.CreateOrder(context.Background(), seed.CustomerID, order.CreateOrderRequest{
+
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					_, err := svc.CreateOrder(ctx, seed.CustomerID, order.CreateOrderRequest{
 						WarehouseID: seed.WarehouseID,
 						Items:       []order.ItemInput{{ProductID: seed.ProductID, Quantity: 1}},
 					})
