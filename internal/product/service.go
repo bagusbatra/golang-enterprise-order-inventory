@@ -8,23 +8,28 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/shopspring/decimal"
 
+	"order-management/pkg/audit"
 	apperr "order-management/pkg/errors"
 )
 
 type Service struct {
 	repo  Repository
 	cache *cache
+	audit audit.Logger
 }
 
 // NewService menerima redisClient yang boleh nil (misal saat unit test
 // tanpa Redis) — cache-aside otomatis dilewati (selalu fallback ke
 // PostgreSQL) tanpa error, karena Redis bukan source of truth (docs/
 // architecture.md Section 5).
-func NewService(repo Repository, redisClient *redis.Client, cacheTTL time.Duration) *Service {
-	return &Service{repo: repo, cache: newCache(redisClient, cacheTTL)}
+func NewService(repo Repository, redisClient *redis.Client, cacheTTL time.Duration, auditLogger audit.Logger) *Service {
+	return &Service{repo: repo, cache: newCache(redisClient, cacheTTL), audit: auditLogger}
 }
 
-func (s *Service) Create(ctx context.Context, req CreateRequest) (*Response, error) {
+// Create membuat produk baru. actorID (dari JWT claims) dicatat sebagai
+// pelaku audit log "CREATE_PRODUCT" (spec Section 20) — operasi sensitif
+// karena langsung mempengaruhi harga yang dilihat customer.
+func (s *Service) Create(ctx context.Context, actorID string, req CreateRequest) (*Response, error) {
 	if err := validatePricing(req.Price, req.CostPrice, req.Weight); err != nil {
 		return nil, err
 	}
@@ -48,6 +53,17 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Response, err
 	if err := s.repo.Create(ctx, p); err != nil {
 		return nil, err
 	}
+
+	_ = s.audit.Log(ctx, audit.Entry{
+		UserID:   &actorID,
+		Action:   "CREATE_PRODUCT",
+		Entity:   "PRODUCT",
+		EntityID: &p.ID,
+		NewData: map[string]any{
+			"sku": p.SKU, "name": p.Name, "price": p.Price.String(), "cost_price": p.CostPrice.String(),
+		},
+	})
+
 	resp := toResponse(p)
 	return &resp, nil
 }
@@ -93,13 +109,19 @@ func (s *Service) List(ctx context.Context, f ListFilter) ([]Response, int64, er
 	return resp, total, nil
 }
 
-func (s *Service) Update(ctx context.Context, id string, req UpdateRequest) (*Response, error) {
+func (s *Service) Update(ctx context.Context, actorID string, id string, req UpdateRequest) (*Response, error) {
 	p, err := s.repo.FindByID(ctx, id)
 	if err != nil {
 		if err == ErrNotFound {
 			return nil, apperr.New(http.StatusNotFound, apperr.ProductNotFound, "Product not found")
 		}
 		return nil, err
+	}
+
+	// Snapshot SEBELUM mutasi — dipakai audit log old_data (spec Section 20,
+	// contoh Section 53 mencontohkan perubahan price secara spesifik).
+	oldSnapshot := map[string]any{
+		"name": p.Name, "price": p.Price.String(), "cost_price": p.CostPrice.String(), "status": string(p.Status),
 	}
 
 	if req.CategoryID != nil {
@@ -137,6 +159,17 @@ func (s *Service) Update(ctx context.Context, id string, req UpdateRequest) (*Re
 	// request lain bisa mengisi cache dengan data lama tepat sebelum
 	// update akhirnya berhasil (race window).
 	s.cache.Invalidate(ctx, id)
+
+	_ = s.audit.Log(ctx, audit.Entry{
+		UserID:   &actorID,
+		Action:   "UPDATE_PRODUCT",
+		Entity:   "PRODUCT",
+		EntityID: &p.ID,
+		OldData:  oldSnapshot,
+		NewData: map[string]any{
+			"name": p.Name, "price": p.Price.String(), "cost_price": p.CostPrice.String(), "status": string(p.Status),
+		},
+	})
 
 	resp := toResponse(p)
 	return &resp, nil

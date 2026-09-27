@@ -186,10 +186,10 @@ func newRouter(cfg *config.Config, log *zap.Logger, db *gorm.DB, redisClient *re
 	// ini (Iterasi 11).
 	auditService := internalaudit.NewService(internalaudit.NewRepository(db))
 
-	authService := auth.NewService(userRepo, jwtManager, redisClient, cfg.RefreshTokenTTL)
+	authService := auth.NewService(userRepo, jwtManager, redisClient, cfg.RefreshTokenTTL, auditService)
 	userService := user.NewService(userRepo, auditService)
 	categoryService := category.NewService(categoryRepo)
-	productService := product.NewService(productRepo, redisClient, 10*time.Minute)
+	productService := product.NewService(productRepo, redisClient, 10*time.Minute, auditService)
 	warehouseService := warehouse.NewService(warehouseRepo)
 	orderRepo := order.NewRepository(db)
 	inventoryService := inventory.NewService(inventoryRepo, db, auditService)

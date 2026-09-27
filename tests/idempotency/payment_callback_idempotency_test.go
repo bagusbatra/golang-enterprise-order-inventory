@@ -27,6 +27,7 @@ import (
 	"order-management/internal/product"
 	"order-management/internal/user"
 	"order-management/internal/warehouse"
+	"order-management/pkg/audit"
 	"order-management/tests/testutil"
 )
 
@@ -95,7 +96,7 @@ func seedBaseData(t *testing.T, db *gorm.DB, initialStock int) seeded {
 
 func buildServices(db *gorm.DB, redisClient *redis.Client) (*order.Service, *payment.Service) {
 	warehouseService := warehouse.NewService(warehouse.NewRepository(db))
-	productService := product.NewService(product.NewRepository(db), redisClient, 10*time.Minute)
+	productService := product.NewService(product.NewRepository(db), redisClient, 10*time.Minute, audit.NopLogger{})
 	inventoryService := inventory.NewService(inventory.NewRepository(db), db, nil)
 	orderService := order.NewService(order.NewRepository(db), db, warehouseService, productService, inventoryService)
 	paymentService := payment.NewService(payment.NewRepository(db), db, orderService, inventoryService)

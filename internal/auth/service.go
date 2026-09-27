@@ -10,6 +10,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"order-management/internal/user"
+	"order-management/pkg/audit"
 	apperr "order-management/pkg/errors"
 	"order-management/pkg/jwt"
 )
@@ -24,10 +25,11 @@ type Service struct {
 	jwtManager *jwt.Manager
 	redis      *redis.Client
 	refreshTTL time.Duration
+	audit      audit.Logger
 }
 
-func NewService(users user.Repository, jwtManager *jwt.Manager, redisClient *redis.Client, refreshTTL time.Duration) *Service {
-	return &Service{users: users, jwtManager: jwtManager, redis: redisClient, refreshTTL: refreshTTL}
+func NewService(users user.Repository, jwtManager *jwt.Manager, redisClient *redis.Client, refreshTTL time.Duration, auditLogger audit.Logger) *Service {
+	return &Service{users: users, jwtManager: jwtManager, redis: redisClient, refreshTTL: refreshTTL, audit: auditLogger}
 }
 
 func refreshKey(userID, tokenID string) string {
@@ -92,6 +94,16 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (*LoginResponse, 
 	if err := s.redis.Set(ctx, refreshKey(u.ID, tokenID), "valid", s.refreshTTL).Err(); err != nil {
 		return nil, err
 	}
+
+	// Login sukses adalah operasi sensitif yang wajib diaudit (spec Section
+	// 20). Dilakukan setelah SELURUH langkah login berhasil (bukan di awal)
+	// supaya percobaan login gagal tidak ikut tercatat sebagai LOGIN.
+	_ = s.audit.Log(ctx, audit.Entry{
+		UserID:   &u.ID,
+		Action:   "LOGIN",
+		Entity:   "USER",
+		EntityID: &u.ID,
+	})
 
 	return &LoginResponse{
 		AccessToken:  accessToken,

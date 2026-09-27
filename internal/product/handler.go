@@ -6,6 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"order-management/internal/middleware"
 	apperr "order-management/pkg/errors"
 	"order-management/pkg/response"
 	"order-management/pkg/validator"
@@ -67,7 +68,7 @@ func (h *Handler) create(c *gin.Context) {
 		return
 	}
 
-	item, err := h.service.Create(c.Request.Context(), req)
+	item, err := h.service.Create(c.Request.Context(), middleware.GetUserID(c), req)
 	if err != nil {
 		response.Error(c, err)
 		return
@@ -86,7 +87,7 @@ func (h *Handler) update(c *gin.Context) {
 		return
 	}
 
-	item, err := h.service.Update(c.Request.Context(), c.Param("id"), req)
+	item, err := h.service.Update(c.Request.Context(), middleware.GetUserID(c), c.Param("id"), req)
 	if err != nil {
 		response.Error(c, err)
 		return

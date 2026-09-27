@@ -10,6 +10,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"order-management/internal/user"
+	"order-management/pkg/audit"
 	"order-management/pkg/jwt"
 )
 
@@ -65,7 +66,7 @@ func newTestService(t *testing.T, repo *fakeUserRepo) *Service {
 
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	manager := jwt.NewManager("test-access-secret", "test-refresh-secret", 15*time.Minute, 168*time.Hour)
-	return NewService(repo, manager, client, 168*time.Hour)
+	return NewService(repo, manager, client, 168*time.Hour, audit.NopLogger{})
 }
 
 func TestLogin_InvalidCredentials_WrongPassword(t *testing.T) {

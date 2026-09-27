@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/shopspring/decimal"
+
+	"order-management/pkg/audit"
 )
 
 // fakeRepo adalah in-memory implementasi Repository khusus unit test, tanpa
@@ -56,7 +58,7 @@ func (f *fakeRepo) Delete(ctx context.Context, id string) error {
 
 func newTestService() *Service {
 	// redisClient nil -> cache-aside otomatis dilewati (lihat Service.NewService).
-	return NewService(newFakeRepo(), nil, 0)
+	return NewService(newFakeRepo(), nil, 0, audit.NopLogger{})
 }
 
 func TestCreate_DuplicateSKU(t *testing.T) {
@@ -67,11 +69,11 @@ func TestCreate_DuplicateSKU(t *testing.T) {
 		CategoryID: "cat-1", SKU: "SKU-001", Name: "Product A",
 		Price: decimal.NewFromInt(100000), CostPrice: decimal.NewFromInt(50000), Weight: decimal.NewFromInt(1),
 	}
-	if _, err := svc.Create(ctx, req); err != nil {
+	if _, err := svc.Create(ctx, "actor-1", req); err != nil {
 		t.Fatalf("first create should succeed: %v", err)
 	}
 
-	_, err := svc.Create(ctx, req)
+	_, err := svc.Create(ctx, "actor-1", req)
 	if err == nil {
 		t.Fatal("expected error for duplicate SKU, got nil")
 	}
@@ -85,7 +87,7 @@ func TestCreate_InvalidPrice_Rejected(t *testing.T) {
 		CategoryID: "cat-1", SKU: "SKU-002", Name: "Product B",
 		Price: decimal.NewFromInt(0), CostPrice: decimal.NewFromInt(50000), Weight: decimal.NewFromInt(1),
 	}
-	_, err := svc.Create(ctx, req)
+	_, err := svc.Create(ctx, "actor-1", req)
 	if err == nil {
 		t.Fatal("expected error for price=0, got nil")
 	}
@@ -99,7 +101,7 @@ func TestCreate_NegativeWeight_Rejected(t *testing.T) {
 		CategoryID: "cat-1", SKU: "SKU-003", Name: "Product C",
 		Price: decimal.NewFromInt(100000), CostPrice: decimal.NewFromInt(50000), Weight: decimal.NewFromInt(-1),
 	}
-	_, err := svc.Create(ctx, req)
+	_, err := svc.Create(ctx, "actor-1", req)
 	if err == nil {
 		t.Fatal("expected error for negative weight, got nil")
 	}
@@ -112,7 +114,7 @@ func TestGetPriceSnapshot_InactiveProduct_Rejected(t *testing.T) {
 	svc := newTestService()
 	ctx := context.Background()
 
-	created, err := svc.Create(ctx, CreateRequest{
+	created, err := svc.Create(ctx, "actor-1", CreateRequest{
 		CategoryID: "cat-1", SKU: "SKU-004", Name: "Product D",
 		Price: decimal.NewFromInt(100000), CostPrice: decimal.NewFromInt(50000), Weight: decimal.NewFromInt(1),
 	})
@@ -121,7 +123,7 @@ func TestGetPriceSnapshot_InactiveProduct_Rejected(t *testing.T) {
 	}
 
 	inactive := "INACTIVE"
-	if _, err := svc.Update(ctx, created.ID, UpdateRequest{Status: &inactive}); err != nil {
+	if _, err := svc.Update(ctx, "actor-1", created.ID, UpdateRequest{Status: &inactive}); err != nil {
 		t.Fatalf("update failed: %v", err)
 	}
 
@@ -135,7 +137,7 @@ func TestGetPriceSnapshot_UsesCurrentPrice(t *testing.T) {
 	svc := newTestService()
 	ctx := context.Background()
 
-	created, err := svc.Create(ctx, CreateRequest{
+	created, err := svc.Create(ctx, "actor-1", CreateRequest{
 		CategoryID: "cat-1", SKU: "SKU-005", Name: "Product E",
 		Price: decimal.NewFromInt(23000000), CostPrice: decimal.NewFromInt(20000000), Weight: decimal.NewFromInt(1),
 	})

@@ -30,6 +30,7 @@ import (
 	"order-management/internal/product"
 	"order-management/internal/user"
 	"order-management/internal/warehouse"
+	"order-management/pkg/audit"
 	apperr "order-management/pkg/errors"
 	"order-management/tests/testutil"
 )
@@ -126,7 +127,7 @@ func resetInventoryAndOrders(t *testing.T, db *gorm.DB, s seeded, initialStock i
 
 func buildOrderService(db *gorm.DB, redisClient *redis.Client) *order.Service {
 	warehouseService := warehouse.NewService(warehouse.NewRepository(db))
-	productService := product.NewService(product.NewRepository(db), redisClient, 10*time.Minute)
+	productService := product.NewService(product.NewRepository(db), redisClient, 10*time.Minute, audit.NopLogger{})
 	inventoryService := inventory.NewService(inventory.NewRepository(db), db, nil)
 	return order.NewService(order.NewRepository(db), db, warehouseService, productService, inventoryService)
 }

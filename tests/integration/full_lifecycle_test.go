@@ -23,6 +23,7 @@ import (
 	"order-management/internal/shipment"
 	"order-management/internal/user"
 	"order-management/internal/warehouse"
+	"order-management/pkg/audit"
 	"order-management/tests/testutil"
 )
 
@@ -98,7 +99,7 @@ type services struct {
 
 func buildServices(db *gorm.DB, redisClient *redis.Client) services {
 	warehouseService := warehouse.NewService(warehouse.NewRepository(db))
-	productService := product.NewService(product.NewRepository(db), redisClient, 10*time.Minute)
+	productService := product.NewService(product.NewRepository(db), redisClient, 10*time.Minute, audit.NopLogger{})
 	inventoryService := inventory.NewService(inventory.NewRepository(db), db, nil)
 	orderService := order.NewService(order.NewRepository(db), db, warehouseService, productService, inventoryService)
 	paymentService := payment.NewService(payment.NewRepository(db), db, orderService, inventoryService)

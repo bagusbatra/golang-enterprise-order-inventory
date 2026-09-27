@@ -98,22 +98,28 @@ make test          # unit test
 make test-race     # seluruh test dengan race detector — WAJIB bersih
 ```
 
-Integration & concurrency test menggunakan Testcontainers (butuh Docker aktif saat `go test`):
+Integration, concurrency, idempotency, dan streams test menggunakan Testcontainers (butuh Docker aktif saat `go test`):
 
 ```bash
-go test ./tests/integration/... -v
-go test ./internal/order/... -run TestConcurrentCheckout -v
+go test ./tests/concurrency/... -v   # 100 concurrent request vs stock=10
+go test ./tests/idempotency/... -v   # 10x payment callback konkuren
+go test ./tests/integration/... -v   # end-to-end + acceptance test Section 75-81
+go test ./tests/streams/... -v       # retry/backoff/dead-letter/crash-recovery
 ```
 
-Skenario kritikal yang harus lolos:
+Skenario kritikal yang sudah PASS (termasuk dengan `-race`, lihat `docs/STATUS.md` untuk detail run):
 - **Concurrency:** stock=10, 100 concurrent request → tepat 10 sukses, 90 gagal, tidak pernah stock negatif.
-- **Idempotency:** payment callback yang sama dikirim 10x → efek bisnis hanya terjadi sekali.
+- **Idempotency:** payment callback yang sama dikirim 10x SECARA KONKUREN → efek bisnis hanya terjadi sekali.
+
+> **Catatan Windows:** `go test -race` butuh cgo + C compiler. Jika belum ada, install MinGW-w64 (`winget install BrechtSanders.WinLibs.POSIX.UCRT`) lalu set `CGO_ENABLED=1`.
 
 ---
 
 ## API Documentation
 
-Swagger UI tersedia di `/swagger/index.html` setelah server berjalan. Kontrak API lengkap (request/response/error per endpoint) juga didokumentasikan di [`docs/api-contract.md`](docs/api-contract.md).
+Kontrak API lengkap (request/response/error per endpoint, role permission matrix) didokumentasikan di [`docs/api-contract.md`](docs/api-contract.md).
+
+> **Known gap:** Swagger UI (`/swagger/index.html`) **belum diimplementasikan** — bukan blocker untuk fungsionalitas backend, tapi menyisakan satu item "Should Have" yang belum selesai. Lihat `docs/FINAL_REPORT.md`.
 
 ---
 
@@ -138,17 +144,19 @@ Authentication flow, create-order flow, payment callback + idempotency flow, exp
 ## Project Structure
 
 ```text
-cmd/server/           entrypoint
-internal/             domain modules (auth, user, category, product, warehouse,
+cmd/server/           entrypoint + route assembly (lihat catatan di bawah)
+internal/             domain modules: auth, user, category, product, warehouse,
                        inventory, order, payment, shipment, notification, audit,
-                       worker, websocket, middleware, router, config)
-pkg/                   shared package (database, redis, jwt, logger, response,
-                       validator, errors, utils)
-migrations/            SQL migration (golang-migrate)
-tests/                 integration & concurrency test
+                       worker, websocket, middleware, config
+pkg/                   shared package: database, redis, jwt, logger, response,
+                       validator, errors, audit, utils
+migrations/            SQL migration (golang-migrate), 000001-000019
+tests/                 integration, concurrency, idempotency, streams (Testcontainers)
 docs/                  requirements, architecture, database contract, api contract,
-                       flowchart, development status
+                       flowchart, development status, final report
 ```
+
+> Deviasi kecil dari struktur di spesifikasi awal: tidak ada package `internal/router/` terpisah — assembly seluruh route dilakukan langsung di `cmd/server/main.go` (fungsinya sama, tiap domain tetap menyediakan `RegisterRoutes()` sendiri).
 
 ---
 
