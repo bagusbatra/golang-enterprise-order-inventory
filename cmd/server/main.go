@@ -1,9 +1,8 @@
 // Entry point aplikasi order-management. Wiring domain Agent 2 (auth, user,
-// category, product, warehouse) dilakukan di sini. Domain Agent 3
-// (inventory, order, payment, shipment, notification, audit, worker,
-// websocket) akan ditambahkan menyusul di bagian yang ditandai TODO di
-// bawah — main.go adalah file bersama, penambahan route/wiring Agent 3
-// harus additive (menambah, bukan menghapus wiring Agent 2 yang sudah ada).
+// category, product, warehouse) DAN Agent 3 (inventory, order, payment,
+// shipment, notification, audit, worker, websocket) — main.go adalah file
+// bersama, seluruh penambahan Agent 3 dilakukan additive (menambah, bukan
+// menghapus wiring Agent 2 yang sudah ada).
 package main
 
 import (
@@ -19,6 +18,7 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
+	internalaudit "order-management/internal/audit"
 	"order-management/internal/auth"
 	"order-management/internal/category"
 	"order-management/internal/config"
@@ -33,7 +33,6 @@ import (
 	"order-management/internal/warehouse"
 	"order-management/internal/websocket"
 	"order-management/internal/worker"
-	"order-management/pkg/audit"
 	"order-management/pkg/database"
 	"order-management/pkg/jwt"
 	"order-management/pkg/logger"
@@ -182,15 +181,18 @@ func newRouter(cfg *config.Config, log *zap.Logger, db *gorm.DB, redisClient *re
 	warehouseRepo := warehouse.NewRepository(db)
 	inventoryRepo := inventory.NewRepository(db)
 
+	// auditService mengimplementasikan pkg/audit.Logger (interface netral
+	// Agent 2) — menggantikan SELURUH pemakaian audit.NopLogger{} di file
+	// ini (Iterasi 11).
+	auditService := internalaudit.NewService(internalaudit.NewRepository(db))
+
 	authService := auth.NewService(userRepo, jwtManager, redisClient, cfg.RefreshTokenTTL)
-	userService := user.NewService(userRepo, audit.NopLogger{})
+	userService := user.NewService(userRepo, auditService)
 	categoryService := category.NewService(categoryRepo)
 	productService := product.NewService(productRepo, redisClient, 10*time.Minute)
 	warehouseService := warehouse.NewService(warehouseRepo)
 	orderRepo := order.NewRepository(db)
-	// audit.NopLogger{} sementara sampai internal/audit (Iterasi 11) di-wire
-	// menggantikan seluruh pemakaian NopLogger di file ini sekaligus.
-	inventoryService := inventory.NewService(inventoryRepo, db, audit.NopLogger{})
+	inventoryService := inventory.NewService(inventoryRepo, db, auditService)
 	// warehouseService & productService memenuhi order.WarehouseChecker &
 	// order.PriceProvider secara implisit (docs/architecture.md Section 2);
 	// inventoryService memenuhi order.StockReserver.
@@ -213,6 +215,12 @@ func newRouter(cfg *config.Config, log *zap.Logger, db *gorm.DB, redisClient *re
 	paymentService.SetEventPublisher(eventPublisher)
 	shipmentService.SetEventPublisher(eventPublisher)
 
+	// Audit log (Iterasi 11) untuk "Create order"/"Cancel order" dan
+	// "Payment callback" (spec Section 20) — inventory adjustment sudah
+	// diaudit sejak Iterasi 03 lewat parameter auditService di atas.
+	orderService.SetAuditLogger(auditService)
+	paymentService.SetAuditLogger(auditService)
+
 	// WebSocket connection manager (Iterasi 10) — Notify dipanggil SETELAH
 	// commit oleh Order/Payment/Shipment Service (spec Section 50 & FILES
 	// AFFECTED note), bukan di dalam transaksi DB.
@@ -231,6 +239,7 @@ func newRouter(cfg *config.Config, log *zap.Logger, db *gorm.DB, redisClient *re
 	paymentHandler := payment.NewHandler(paymentService)
 	notificationHandler := notification.NewHandler(notificationService)
 	shipmentHandler := shipment.NewHandler(shipmentService)
+	auditHandler := internalaudit.NewHandler(auditService)
 
 	jwtAuth := middleware.JWTAuth(jwtManager)
 	adminOnly := middleware.RequireRole("ADMIN")
@@ -269,6 +278,7 @@ func newRouter(cfg *config.Config, log *zap.Logger, db *gorm.DB, redisClient *re
 	paymentHandler.RegisterRoutes(protected.Group("/orders"), protected.Group("/payments"), customerOnly)
 	notificationHandler.RegisterRoutes(protected.Group("/notifications"))
 	shipmentHandler.RegisterRoutes(protected.Group("/orders"), protected.Group("/shipments"), warehouseOnly)
+	auditHandler.RegisterRoutes(protected.Group("/audit-logs", adminOnly))
 
 	// POST /payments/callback: publik (simulasi gateway eksternal), TIDAK
 	// pakai middleware jwtAuth — divalidasi lewat transaction_id di service.
@@ -279,9 +289,6 @@ func newRouter(cfg *config.Config, log *zap.Logger, db *gorm.DB, redisClient *re
 	// dalam handler sendiri (Locked Decision), bukan via middleware.JWTAuth.
 	wsHandler := websocket.NewHandler(wsManager, jwtManager, log)
 	wsHandler.RegisterRoutes(r)
-
-	// TODO(Agent 3): daftarkan route audit di sini setelah Iterasi 11
-	// selesai (lihat docs/api-contract.md).
 
 	return r, paymentService, notificationService
 }

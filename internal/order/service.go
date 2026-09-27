@@ -12,6 +12,7 @@ import (
 	"gorm.io/gorm"
 
 	"order-management/internal/websocket"
+	pkgaudit "order-management/pkg/audit"
 	apperr "order-management/pkg/errors"
 )
 
@@ -70,10 +71,21 @@ type Service struct {
 	stock     StockReserver
 	events    EventPublisher
 	ws        *websocket.Manager
+	audit     pkgaudit.Logger
 }
 
 func NewService(repo Repository, db TxRunner, warehouse WarehouseChecker, price PriceProvider, stock StockReserver) *Service {
-	return &Service{repo: repo, db: db, warehouse: warehouse, price: price, stock: stock}
+	return &Service{repo: repo, db: db, warehouse: warehouse, price: price, stock: stock, audit: pkgaudit.NopLogger{}}
+}
+
+// SetAuditLogger menyuntikkan implementasi audit (Iterasi 11) untuk
+// "Create order" & "Cancel order" (spec Section 20). nil-safe: kalau tidak
+// pernah dipanggil, tetap memakai pkgaudit.NopLogger dari NewService.
+func (s *Service) SetAuditLogger(a pkgaudit.Logger) {
+	if a == nil {
+		a = pkgaudit.NopLogger{}
+	}
+	s.audit = a
 }
 
 // SetEventPublisher menyuntikkan publisher Redis Streams (Iterasi 07) tanpa
@@ -221,6 +233,13 @@ func (s *Service) CreateOrder(ctx context.Context, customerID string, req Create
 			"customer_id": customerID,
 		})
 	}
+	_ = s.audit.Log(ctx, pkgaudit.Entry{
+		UserID:   &customerID,
+		Action:   "CREATE_ORDER",
+		Entity:   "ORDER",
+		EntityID: &result.ID,
+		NewData:  map[string]string{"status": result.Status, "grand_total": result.GrandTotal},
+	})
 	return &result, nil
 }
 
@@ -270,6 +289,7 @@ func (s *Service) List(ctx context.Context, actorUserID, actorRole, status, cust
 // hanya melepas reserved_quantity yang mungkin masih tersisa).
 func (s *Service) Cancel(ctx context.Context, actorUserID, actorRole, orderID string) (*Response, error) {
 	var result Response
+	var previousStatus Status
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		o, err := s.repo.LockForUpdate(ctx, tx, orderID)
 		if err != nil {
@@ -286,6 +306,7 @@ func (s *Service) Cancel(ctx context.Context, actorUserID, actorRole, orderID st
 		if !CanTransition(o.Status, StatusCancelled) {
 			return apperr.New(http.StatusUnprocessableEntity, apperr.OrderInvalidStatus, "Order cannot be cancelled from its current status")
 		}
+		previousStatus = o.Status
 
 		// Reserved stock hanya aktif untuk PENDING/WAITING_PAYMENT. Order yang
 		// sudah PAID: quantity fisik SUDAH dipotong saat stock-out dan
@@ -320,6 +341,14 @@ func (s *Service) Cancel(ctx context.Context, actorUserID, actorRole, orderID st
 	if s.events != nil {
 		_ = s.events.Publish(ctx, "order_events", "ORDER_CANCELLED", orderID, map[string]string{"order_id": orderID})
 	}
+	_ = s.audit.Log(ctx, pkgaudit.Entry{
+		UserID:   &actorUserID,
+		Action:   "CANCEL_ORDER",
+		Entity:   "ORDER",
+		EntityID: &orderID,
+		OldData:  map[string]string{"status": string(previousStatus)},
+		NewData:  map[string]string{"status": string(StatusCancelled)},
+	})
 	s.notifyStatusUpdated(result.CustomerID, orderID, StatusCancelled)
 	return &result, nil
 }

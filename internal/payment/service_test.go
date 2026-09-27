@@ -140,8 +140,8 @@ func (f *fakeOrderGateway) ItemsByOrderID(ctx context.Context, tx *gorm.DB, orde
 }
 
 type fakeStockAdjuster struct {
-	stockOutCalls  int
-	releaseCalls   int
+	stockOutCalls int
+	releaseCalls  int
 }
 
 func (f *fakeStockAdjuster) StockOut(ctx context.Context, tx *gorm.DB, productID, warehouseID string, qty int, referenceID string) error {

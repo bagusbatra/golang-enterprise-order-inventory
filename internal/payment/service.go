@@ -12,6 +12,7 @@ import (
 
 	"order-management/internal/order"
 	"order-management/internal/websocket"
+	pkgaudit "order-management/pkg/audit"
 	apperr "order-management/pkg/errors"
 )
 
@@ -56,14 +57,24 @@ type Service struct {
 	stock  StockAdjuster
 	events EventPublisher
 	ws     *websocket.Manager
+	audit  pkgaudit.Logger
 }
 
 func NewService(repo Repository, db TxRunner, orderGateway OrderGateway, stock StockAdjuster) *Service {
-	return &Service{repo: repo, db: db, order: orderGateway, stock: stock}
+	return &Service{repo: repo, db: db, order: orderGateway, stock: stock, audit: pkgaudit.NopLogger{}}
 }
 
 func (s *Service) SetEventPublisher(p EventPublisher) {
 	s.events = p
+}
+
+// SetAuditLogger menyuntikkan implementasi audit (Iterasi 11) untuk
+// "Payment callback" (spec Section 20).
+func (s *Service) SetAuditLogger(a pkgaudit.Logger) {
+	if a == nil {
+		a = pkgaudit.NopLogger{}
+	}
+	s.audit = a
 }
 
 // SetWebSocketManager — lihat internal/order/service.go untuk rationale
@@ -249,6 +260,16 @@ func (s *Service) Callback(ctx context.Context, req CallbackRequest) error {
 			})
 		}
 		s.notifyStatusUpdated(customerID, req.OrderID, order.StatusPaid)
+
+		// "Payment callback" adalah operasi sensitif (spec Section 20).
+		// UserID nil — callback datang dari gateway eksternal tanpa JWT
+		// (Locked Decision), bukan dari user terautentikasi.
+		_ = s.audit.Log(ctx, pkgaudit.Entry{
+			Action:   "PAYMENT_CALLBACK",
+			Entity:   "PAYMENT",
+			EntityID: &paymentID,
+			NewData:  map[string]string{"status": "PAID", "order_id": req.OrderID, "transaction_id": req.TransactionID},
+		})
 	}
 	return nil
 }
