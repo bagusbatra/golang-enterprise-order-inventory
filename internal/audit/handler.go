@@ -24,6 +24,18 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 	rg.GET("/:id", h.get)
 }
 
+// list godoc
+// @Summary List audit log (ADMIN only)
+// @Tags Audit
+// @Security BearerAuth
+// @Produce json
+// @Param page query int false "default 1"
+// @Param limit query int false "default 20, max 100"
+// @Param entity query string false "filter"
+// @Param user_id query string false "filter"
+// @Success 200 {object} map[string]interface{}
+// @Failure 403 {object} map[string]interface{} "forbidden"
+// @Router /audit-logs [get]
 func (h *Handler) list(c *gin.Context) {
 	page, _ := strconv.Atoi(c.Query("page"))
 	limit, _ := strconv.Atoi(c.Query("limit"))
@@ -37,6 +49,15 @@ func (h *Handler) list(c *gin.Context) {
 	response.List(c, "Audit logs retrieved successfully", items, response.NewMeta(page, limit, total))
 }
 
+// get godoc
+// @Summary Detail audit log (ADMIN only)
+// @Tags Audit
+// @Security BearerAuth
+// @Produce json
+// @Param id path string true "Audit Log ID"
+// @Success 200 {object} Response
+// @Failure 404 {object} map[string]interface{} "not found"
+// @Router /audit-logs/{id} [get]
 func (h *Handler) get(c *gin.Context) {
 	item, err := h.service.GetByID(c.Request.Context(), c.Param("id"))
 	if err != nil {

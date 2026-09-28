@@ -28,6 +28,17 @@ func (h *Handler) RegisterRoutes(ordersGroup, shipmentsGroup *gin.RouterGroup, w
 	shipmentsGroup.GET("/:id", h.get)
 }
 
+// pack godoc
+// @Summary Pack order (WAREHOUSE only)
+// @Description Transisi PAID -> PACKED
+// @Tags Shipments
+// @Security BearerAuth
+// @Produce json
+// @Param id path string true "Order ID"
+// @Success 200 {object} internal_order.Response
+// @Failure 403 {object} map[string]interface{} "forbidden"
+// @Failure 422 {object} map[string]interface{} "invalid order status"
+// @Router /orders/{id}/pack [post]
 func (h *Handler) pack(c *gin.Context) {
 	item, err := h.service.Pack(c.Request.Context(), c.Param("id"))
 	if err != nil {
@@ -37,6 +48,18 @@ func (h *Handler) pack(c *gin.Context) {
 	response.Success(c, http.StatusOK, "Order packed successfully", item)
 }
 
+// ship godoc
+// @Summary Ship order (WAREHOUSE only)
+// @Description Transisi PACKED -> SHIPPED, generate tracking_number, kirim notifikasi + WS event
+// @Tags Shipments
+// @Security BearerAuth
+// @Accept json
+// @Produce json
+// @Param id path string true "Order ID"
+// @Param request body ShipRequest false "courier opsional, default Simulated Courier"
+// @Success 201 {object} internal_order.Response
+// @Failure 422 {object} map[string]interface{} "invalid order status"
+// @Router /orders/{id}/ship [post]
 func (h *Handler) ship(c *gin.Context) {
 	var req ShipRequest
 	if c.Request.ContentLength > 0 {
@@ -54,6 +77,16 @@ func (h *Handler) ship(c *gin.Context) {
 	response.Success(c, http.StatusCreated, "Order shipped successfully", item)
 }
 
+// deliver godoc
+// @Summary Deliver shipment (WAREHOUSE only)
+// @Description Transisi IN_TRANSIT/PICKED_UP -> DELIVERED, order -> COMPLETED
+// @Tags Shipments
+// @Security BearerAuth
+// @Produce json
+// @Param id path string true "Shipment ID"
+// @Success 200 {object} Response
+// @Failure 422 {object} map[string]interface{} "invalid shipment status"
+// @Router /shipments/{id}/deliver [post]
 func (h *Handler) deliver(c *gin.Context) {
 	item, err := h.service.Deliver(c.Request.Context(), c.Param("id"))
 	if err != nil {
@@ -63,6 +96,15 @@ func (h *Handler) deliver(c *gin.Context) {
 	response.Success(c, http.StatusOK, "Shipment delivered successfully", item)
 }
 
+// get godoc
+// @Summary Detail shipment (owner atau ADMIN/SALES/WAREHOUSE)
+// @Tags Shipments
+// @Security BearerAuth
+// @Produce json
+// @Param id path string true "Shipment ID"
+// @Success 200 {object} Response
+// @Failure 404 {object} map[string]interface{} "not found"
+// @Router /shipments/{id} [get]
 func (h *Handler) get(c *gin.Context) {
 	actorID := middleware.GetUserID(c)
 	role := middleware.GetRole(c)

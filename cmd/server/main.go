@@ -15,6 +15,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
+	swaggerFiles "github.com/swaggo/files"
+	ginSwagger "github.com/swaggo/gin-swagger"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
@@ -37,8 +39,19 @@ import (
 	"order-management/pkg/jwt"
 	"order-management/pkg/logger"
 	pkgredis "order-management/pkg/redis"
+
+	_ "order-management/docs/swagger"
 )
 
+// @title Enterprise Order & Inventory Management API
+// @version 1.0
+// @description Backend REST API + WebSocket untuk PT Digital Distribution — order, inventory, payment, shipment management dengan concurrency-safe stock reservation dan idempotent payment callback.
+// @contact.name Enterprise Order & Inventory Management System
+// @BasePath /api/v1
+// @securityDefinitions.apikey BearerAuth
+// @in header
+// @name Authorization
+// @description Masukkan access token dengan format: Bearer {token}
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -143,6 +156,8 @@ func newRouter(cfg *config.Config, log *zap.Logger, db *gorm.DB, redisClient *re
 
 	r := gin.New()
 	r.Use(middleware.RequestID(), middleware.Logger(log), middleware.Recovery(log), middleware.CORS())
+
+	r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 
 	r.GET("/health", func(c *gin.Context) {
 		dbStatus := "ok"

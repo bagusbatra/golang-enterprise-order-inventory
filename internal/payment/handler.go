@@ -29,6 +29,18 @@ func (h *Handler) RegisterRoutes(ordersGroup, paymentsGroup *gin.RouterGroup, cu
 	paymentsGroup.GET("/:id", h.get)
 }
 
+// create godoc
+// @Summary Buat payment untuk order (CUSTOMER, owner only)
+// @Description payment_method default BANK_TRANSFER, expired_at = now+30m
+// @Tags Payments
+// @Security BearerAuth
+// @Accept json
+// @Produce json
+// @Param id path string true "Order ID"
+// @Param request body CreatePaymentRequest false "payment_method opsional"
+// @Success 201 {object} Response
+// @Failure 422 {object} map[string]interface{} "order status invalid"
+// @Router /orders/{id}/payment [post]
 func (h *Handler) create(c *gin.Context) {
 	var req CreatePaymentRequest
 	// Body opsional (payment_method?) — body kosong tetap valid, jadi
@@ -53,6 +65,15 @@ func (h *Handler) create(c *gin.Context) {
 	response.Success(c, http.StatusCreated, "Payment created successfully", item)
 }
 
+// get godoc
+// @Summary Detail payment (owner atau ADMIN/SALES)
+// @Tags Payments
+// @Security BearerAuth
+// @Produce json
+// @Param id path string true "Payment ID"
+// @Success 200 {object} Response
+// @Failure 404 {object} map[string]interface{} "not found"
+// @Router /payments/{id} [get]
 func (h *Handler) get(c *gin.Context) {
 	actorID := middleware.GetUserID(c)
 	role := middleware.GetRole(c)
@@ -67,6 +88,17 @@ func (h *Handler) get(c *gin.Context) {
 
 // Callback menangani POST /payments/callback — endpoint publik (simulasi
 // gateway eksternal), TIDAK pakai middleware JWT.
+// Callback godoc
+// @Summary Payment gateway callback (simulasi, publik/tanpa JWT)
+// @Description Idempotent — callback yang sama dikirim berkali-kali hanya menghasilkan efek bisnis satu kali (UNIQUE transaction_id + status check)
+// @Tags Payments
+// @Accept json
+// @Produce json
+// @Param request body CallbackRequest true "Callback dari payment gateway"
+// @Success 200 {object} map[string]interface{}
+// @Failure 404 {object} map[string]interface{} "payment not found"
+// @Failure 422 {object} map[string]interface{} "invalid callback"
+// @Router /payments/callback [post]
 func (h *Handler) Callback(c *gin.Context) {
 	var req CallbackRequest
 	if err := c.ShouldBindJSON(&req); err != nil {

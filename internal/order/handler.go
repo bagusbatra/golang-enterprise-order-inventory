@@ -32,6 +32,18 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup, customerSalesOnly, custome
 	rg.POST("/:id/cancel", customerOrAdmin, h.cancel)
 }
 
+// create godoc
+// @Summary Buat order baru (CUSTOMER, SALES)
+// @Description Concurrency-safe stock reservation via PostgreSQL row lock
+// @Tags Orders
+// @Security BearerAuth
+// @Accept json
+// @Produce json
+// @Param request body CreateOrderRequest true "Warehouse & item order"
+// @Success 201 {object} Response
+// @Failure 409 {object} map[string]interface{} "insufficient stock"
+// @Failure 422 {object} map[string]interface{} "warehouse inactive"
+// @Router /orders [post]
 func (h *Handler) create(c *gin.Context) {
 	var req CreateOrderRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -52,6 +64,16 @@ func (h *Handler) create(c *gin.Context) {
 	response.Success(c, http.StatusCreated, "Order created successfully", item)
 }
 
+// get godoc
+// @Summary Detail order (CUSTOMER: own only, lainnya sesuai permission)
+// @Tags Orders
+// @Security BearerAuth
+// @Produce json
+// @Param id path string true "Order ID"
+// @Success 200 {object} DetailResponse
+// @Failure 403 {object} map[string]interface{} "forbidden"
+// @Failure 404 {object} map[string]interface{} "not found"
+// @Router /orders/{id} [get]
 func (h *Handler) get(c *gin.Context) {
 	actorID := middleware.GetUserID(c)
 	role := middleware.GetRole(c)
@@ -64,6 +86,17 @@ func (h *Handler) get(c *gin.Context) {
 	response.Success(c, http.StatusOK, "Order retrieved successfully", item)
 }
 
+// list godoc
+// @Summary List order (CUSTOMER: own only, lainnya sesuai permission)
+// @Tags Orders
+// @Security BearerAuth
+// @Produce json
+// @Param page query int false "default 1"
+// @Param limit query int false "default 20, max 100"
+// @Param status query string false "filter"
+// @Param customer_id query string false "ADMIN/SALES only"
+// @Success 200 {object} map[string]interface{}
+// @Router /orders [get]
 func (h *Handler) list(c *gin.Context) {
 	page, _ := strconv.Atoi(c.Query("page"))
 	limit, _ := strconv.Atoi(c.Query("limit"))
@@ -79,6 +112,16 @@ func (h *Handler) list(c *gin.Context) {
 	response.List(c, "Orders retrieved successfully", items, response.NewMeta(page, limit, total))
 }
 
+// cancel godoc
+// @Summary Batalkan order (CUSTOMER: own, ADMIN)
+// @Description Hanya dari status PENDING/WAITING_PAYMENT/PAID; release reserved stock
+// @Tags Orders
+// @Security BearerAuth
+// @Produce json
+// @Param id path string true "Order ID"
+// @Success 200 {object} Response
+// @Failure 422 {object} map[string]interface{} "invalid order status"
+// @Router /orders/{id}/cancel [post]
 func (h *Handler) cancel(c *gin.Context) {
 	actorID := middleware.GetUserID(c)
 	role := middleware.GetRole(c)
