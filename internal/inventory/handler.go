@@ -34,6 +34,7 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup, adminWarehouse, adminOnly 
 func (h *Handler) list(c *gin.Context) {
 	page, _ := strconv.Atoi(c.Query("page"))
 	limit, _ := strconv.Atoi(c.Query("limit"))
+	page, limit = response.NormalizePagination(page, limit)
 	lowStock, _ := strconv.ParseBool(c.Query("low_stock"))
 
 	f := ListFilter{
@@ -64,6 +65,7 @@ func (h *Handler) get(c *gin.Context) {
 func (h *Handler) listTransactions(c *gin.Context) {
 	page, _ := strconv.Atoi(c.Query("page"))
 	limit, _ := strconv.Atoi(c.Query("limit"))
+	page, limit = response.NormalizePagination(page, limit)
 
 	items, total, err := h.service.ListTransactions(c.Request.Context(), c.Param("id"), page, limit)
 	if err != nil {

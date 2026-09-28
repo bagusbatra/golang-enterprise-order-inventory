@@ -67,6 +67,7 @@ func (h *Handler) get(c *gin.Context) {
 func (h *Handler) list(c *gin.Context) {
 	page, _ := strconv.Atoi(c.Query("page"))
 	limit, _ := strconv.Atoi(c.Query("limit"))
+	page, limit = response.NormalizePagination(page, limit)
 	actorID := middleware.GetUserID(c)
 	role := middleware.GetRole(c)
 

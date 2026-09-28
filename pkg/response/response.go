@@ -39,6 +39,23 @@ type Meta struct {
 	TotalPages int   `json:"total_pages"`
 }
 
+// NormalizePagination menerapkan default pagination (spec Section 61:
+// page=1, limit=20, max limit=100) sebelum request diteruskan ke service
+// DAN sebelum dipakai membangun Meta — dipanggil di handler agar nilai yang
+// ditampilkan di response.meta selalu konsisten dengan nilai yang benar-benar
+// dipakai untuk query (bug ditemukan lewat manual testing: handler sempat
+// mengirim page/limit mentah dari query string, yang bisa 0 jika client
+// tidak mengirim parameter, padahal service sudah menormalkannya sendiri).
+func NormalizePagination(page, limit int) (int, int) {
+	if page <= 0 {
+		page = 1
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	return page, limit
+}
+
 // NewMeta menghitung total_pages dari total & limit sehingga caller tidak
 // perlu menghitung pembagian pembulatan ke atas secara manual di tiap tempat.
 func NewMeta(page, limit int, total int64) Meta {

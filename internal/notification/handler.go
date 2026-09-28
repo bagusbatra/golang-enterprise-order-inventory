@@ -30,6 +30,7 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 func (h *Handler) list(c *gin.Context) {
 	page, _ := strconv.Atoi(c.Query("page"))
 	limit, _ := strconv.Atoi(c.Query("limit"))
+	page, limit = response.NormalizePagination(page, limit)
 
 	var isRead *bool
 	if v := c.Query("is_read"); v != "" {

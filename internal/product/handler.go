@@ -31,6 +31,7 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup, adminOnly gin.HandlerFunc)
 func (h *Handler) list(c *gin.Context) {
 	page, _ := strconv.Atoi(c.Query("page"))
 	limit, _ := strconv.Atoi(c.Query("limit"))
+	page, limit = response.NormalizePagination(page, limit)
 
 	items, total, err := h.service.List(c.Request.Context(), ListFilter{
 		Search:     c.Query("search"),
